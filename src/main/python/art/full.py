@@ -87,12 +87,15 @@ def loss_style(style_layers, layers_weights, x_layers):
         return ratio * tf.reduce_sum(tf.pow(G - A, 2))
     return reduce(tf.add, (wl * unit_loss(style_layers[l], x_layers[l]) for l, wl in layers_weights.items()))
 
-MEAN_VALUES = np.array([123.68, 116.779, 103.939]).reshape((1, 1, 1, 3))
+MEAN_VALUES = np.array([123.68, 116.779, 103.939]).reshape((1,1,1,3))
 
 
 def load_image(path):
     img = sp.misc.imread(path)
     img = np.reshape(img, ((1,) + img.shape))
+
+    if img.shape[-1] != 3:
+        img = img[:,:,:,:3]
     img = img - MEAN_VALUES
     return img
 
@@ -116,72 +119,42 @@ def save_image(path, img):
     scipy.misc.imsave(path, img)
 
 
-np.random.seed(0)
+def execute(content_path, style_path,  output_dir, vgg_path, content_layers_weights, style_layers_weights, alpha, beta, device='/gpu:0', total_step=10000, snapshot_step=100):
+    content = load_image(content_path)
+    style = load_image(style_path)
+    if content.shape != style.shape:
+        style = sp.misc.imresize(style[0,:,:,:], content.shape[1:], interp='bicubic')
+        style = np.reshape(style, content.shape)
 
-content = load_image('./PNC.jpg')
-# content = sp.misc.imresize(content[0,:,:,:], (128, 128, content.shape[-1]), interp='bilinear')
-# content = np.reshape(content, ((1,) + content.shape))
-style = load_image('./otto.jpg')
-if content.shape != style.shape:
-    style = sp.misc.imresize(style[0,:,:,:], content.shape[1:], interp='bilinear')
-    style = np.reshape(style, content.shape)
+    with tf.device(device):
+        # Use constant to improve performance
+        # http://stackoverflow.com/questions/37596333/tensorflow-store-training-data-on-gpu-memory
+        img_content = tf.constant(content, dtype=tf.float32) # FIXME don't use shape of loaded content
+        img_style = tf.constant(style, dtype=tf.float32) # FIXME don't use shape of loaded style
 
-device = '/gpu:0'
+        img_target = dummy_image(img_content, ratio=0.6, shape=content.shape) # FIXME don't use shape of loaded content
 
-with tf.device(device):
-    # Use constant to improve performance
-    # http://stackoverflow.com/questions/37596333/tensorflow-store-training-data-on-gpu-memory
-    img_content = tf.constant(content, dtype=tf.float32) # FIXME don't use shape of loaded content
-    img_style = tf.constant(style, dtype=tf.float32) # FIXME don't use shape of loaded style
+        vgg_content = load_vgg_layers(vgg_path, img_content)
+        vgg_style = load_vgg_layers(vgg_path, img_style)
+        vgg_target = load_vgg_layers(vgg_path, img_target)
 
-    img_target = dummy_image(img_content, ratio=0.6, shape=content.shape) # FIXME don't use shape of loaded content
+        content_loss = loss_content(vgg_content, content_layers_weights, vgg_target)
+        style_loss = loss_style(vgg_style, style_layers_weights, vgg_target)
+        total_loss = alpha * content_loss + beta * style_loss
+        train_step = tf.train.AdamOptimizer(2.0).minimize(total_loss)
 
-    vgg_path = './imagenet-vgg-verydeep-19.mat'
-    vgg_content = load_vgg_layers(vgg_path, img_content)
-    vgg_style = load_vgg_layers(vgg_path, img_style)
-    vgg_target = load_vgg_layers(vgg_path, img_target)
+        init = tf.global_variables_initializer()
 
-content_layers_weights = normalized_weights({ 'conv4_2': 1. })
-# style_layers_weights = normalized_weights({
-#     'conv1_1': 1,
-#     'conv2_1': 1,
-#     'conv3_1': 1,
-#     'conv4_1': 1,
-#     'conv5_1': 1
-# })
-style_layers_weights = normalized_weights({
-    'conv1_1': 0.5,
-    'conv2_1': 1.0,
-    'conv3_1': 1.5,
-    'conv4_1': 3.0,
-    'conv5_1': 4.0
-})
+    with tf.Session() as sess:
+        sess.run(init)
 
-alpha = 100
-beta = 5
+        # Fix vgg layers of content and style
+        for layer in content_layers_weights.keys():
+            vgg_content[layer] = sess.run(vgg_content[layer])
+        for layer in style_layers_weights.keys():
+            vgg_style[layer] = sess.run(vgg_style[layer])
 
-
-with tf.device(device):
-    content_loss = loss_content(vgg_content, content_layers_weights, vgg_target)
-    style_loss = loss_style(vgg_style, style_layers_weights, vgg_target)
-    total_loss = alpha * content_loss + beta * style_loss
-    train_step = tf.train.AdamOptimizer(2.0).minimize(total_loss)
-
-init = tf.global_variables_initializer()
-
-with tf.Session() as sess:
-    sess.run(init)
-
-    def sess_runner(tensor):
-        return sess.run(tensor)
-
-    # Fix vgg layers of content and style
-    for layer in content_layers_weights.keys():
-        vgg_content[layer] = sess_runner(vgg_content[layer])
-    for layer in style_layers_weights.keys():
-        vgg_style[layer] = sess_runner(vgg_style[layer])
-
-    for i in tqdm(range(5001)):
-        sess_runner(train_step)
-        if i % 50 == 0:
-            save_image('./output5/' + str(i) + '.png', sess_runner(img_target))
+        for i in tqdm(range(total_step + 1)):
+            sess.run(train_step)
+            if i % snapshot_step == 0:
+                save_image(output_dir + '/' + str(i) + '.png', sess.run(img_target))
