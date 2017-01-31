@@ -1,4 +1,4 @@
-from .full import *
+from .deep_art import execute
 import .image
 from tqdm import tqdm
 

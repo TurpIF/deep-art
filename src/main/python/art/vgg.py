@@ -4,10 +4,11 @@ class VGGModel:
     def __init__(self, graph):
         self.graph = graph
 
-    def __get_attr__(self, name):
-        if name in graph:
-            return graph[name]
-        raise NotAttributeError(name)
+    def __getattr__(self, name):
+        return graph[name]
+
+    def __getitem__(self, item):
+        return graph[item]
 
 
 class VGGFactory:
